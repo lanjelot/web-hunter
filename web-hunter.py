@@ -5,7 +5,7 @@ import httplib
 import re
 import sys
 from time import sleep
-from urllib import quote
+from urllib import quote, unquote
 from urllib import urlencode
 from urlparse import urlparse
 from optparse import OptionParser
@@ -199,8 +199,7 @@ class BaseSE(BasePlugin):
     return '@%s' % self.domain
 
   def re_url(self):
-    #return re.compile(r'href="(\w+://(?:[^/]+\.)?%s(?::[\d\w]+)?/.*?)"' % self.domain, re.I)
-    return re.compile(r'href="?(\w+://[\w.-]*%s(?::[\d\w]+)?/.*?)"' % self.domain, re.I)
+    return re.compile(r'href="(\w+://(?:[^/]+\.)?%s(?::[\d\w]+)?/.*?)"' % self.domain, re.I)
 
   def re_subdomain(self):
     return re.compile(r'(\w+://[^/]*%s(?::[\d\w]+)?/)' % self.domain, re.I)
@@ -223,27 +222,34 @@ class GoogleSE(BaseSE):
   # asking beyond page 9 gives warning page "Google does not serve more than 1000 results for any query"
   maxpages = 10
 
+  def re_url(self):
+    return re.compile(r'href="/url\?q=(\w+://(?:[^/]+\.)?%s(?::[\d\w]+)?/.*?)(?:%%2B|&amp)' % self.domain, re.I)
+
+  def post_url(self, urls):
+    return [unquote(u) for u in remove_tags(urls)]
+
   def __init__(self, domain, extra=None, hunt_url=True, hunt_subdomain=True, hunt_email=True):
     BaseSE.__init__(self, domain, extra, hunt_url, hunt_subdomain, hunt_email)
 
   def request(self, query):
     headers = {'User-Agent': useragent_googlebot, # googlebot is less likely to get banned
                'Host': 'www.google.com',}
+
     if self.headers:
       headers.update(self.headers)
 
+    proxies = {} #{'http': 'http://127.0.0.1:8082', 'https': 'http://127.0.0.1:8082'} # debug
+    opener = urllib2.build_opener(urllib2.ProxyHandler(proxies))
+    opener.addheaders = headers.items()
+
     for page_idx in range(self.maxpages):
       # query string sent by the advanced search form
-      uri = '/search?q=%s&hl=en&num=100&lr=&ft=i&cr=&safe=images&filter=0&start=%d' \
-        % (quote(query.strip()), page_idx * 100)
+      uri = '/search?q=%s&hl=en&num=100&lr=&ft=i&cr=&safe=images&filter=0&start=%d' % (quote(query.strip()), page_idx * 100)
       logger.debug('Google: %s' % uri)
+      r = opener.open('http://www.google.com' + uri)
 
-      q = httplib.HTTPConnection('www.google.com')
-      q.request('GET', uri, headers=headers)
-
-      r = q.getresponse()
-      if r.status != 200:
-        raise Exception('HTTP error: %d %s' % (r.status, r.reason))
+      if r.code != 200:
+        raise Exception('HTTP error: %d %s' % (r.code, r.msg))
 
       yield r.read()
 
@@ -255,7 +261,7 @@ class BingSE(BaseSE):
   def request(self, query):
     headers = {'User-Agent': 'Mozilla/5.0',
                'Host': 'www.bing.com',
-               'Accept-Language': 'en-us,en'} # we need get the Next button in english
+               'Accept-Language': 'en-us,en'} # we need the Next button in English
     if self.headers:
       headers.update(self.headers)
 
