@@ -271,7 +271,7 @@ class BingSE(BaseSE):
     opener.addheaders = headers.items()
 
     # either stop after too many pages or after the Next button disappears
-    btn_next = 'Next</a></li></ul></div>'
+    btn_next = 'Next</div></a></li>'
 
     page_idx = 0
     stop = False
