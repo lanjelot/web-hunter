@@ -112,8 +112,8 @@ class BasePlugin(Thread):
   @staticmethod
   def pprint_subdomain(subdomains, title='Subdomains'):
     rr = {}
-    for url in set(subdomains):
-      scheme, hostname = re.match(r'(https?)://(.+?)/?$', url).groups()
+    for domain in set(subdomains):
+      scheme, hostname = re.match(r'(\w+)://([^/]*.+(?::[\d\w]+)?)/$', domain, re.I).groups()
       try:
         ip = gethostbyname(hostname.split(':')[0])
       except gaierror:
