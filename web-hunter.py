@@ -1,19 +1,25 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 
-import httplib
 import re
-import sys
 from time import sleep
-from urllib import quote, unquote
-from urllib import urlencode
-from urlparse import urlparse
 from optparse import OptionParser
 import logging
 from threading import Thread, active_count
-import urllib2
-from cookielib import CookieJar
 from socket import gethostbyname, gaierror
+import pycurl
+
+try:
+  # python3+
+  from urllib.parse import quote, unquote, urlparse
+  from io import StringIO
+  from html.parser import HTMLParser
+except ImportError:
+  # python2.6+
+  from urllib import quote, unquote
+  from urlparse import urlparse
+  from cStringIO import StringIO
+  from HTMLParser import HTMLParser
 
 formatter = logging.Formatter('%(asctime)s %(name)s %(levelname)7s - %(message)s', datefmt='%H:%M:%S')
 handler = logging.StreamHandler()
@@ -23,6 +29,9 @@ logger = logging.getLogger('webhunter')
 logger.setLevel(logging.INFO)
 logger.addHandler(handler)
 
+def decode_html(s):
+  return HTMLParser().unescape(s)
+
 def parse_options(argv):
   usage_str = "usage: %prog options domain\n\n" \
     "Hunt domain for URLs, subdomains and emails:\n" \
@@ -31,36 +40,28 @@ def parse_options(argv):
     "$ %prog -e -p google -x 'google|query|-inurl:index.php example.com' -x 'google|headers|Cookie: GDSESS=..' example.com\n\n" \
     "Hunt for subdomains using only Bing and a specific search:\n" \
     "$ %prog -s -p bing -x 'bing|query|ip:1.2.3.4' example.com\n\n" \
-    "Both plugins support the filetype operator:\n" \
+    "Both search engines support the filetype operator:\n" \
     "$ %prog -u -x 'bing,google|query|example.com -filetype:pdf' example.com"
 
   parser = OptionParser(usage=usage_str)
 
-  parser.add_option('-u', dest='hunt_url', action='store_true', default=False,
-    help='hunt for URLs')
-  parser.add_option('-s', dest='hunt_subdomain', action='store_true', default=False,
-    help='hunt for subdomains')
-  parser.add_option('-e', dest='hunt_email', action='store_true', default=False,
-    help='hunt for emails')
+  parser.add_option('-u', dest='hunt_url', action='store_true', default=False, help='hunt for URLs')
+  parser.add_option('-s', dest='hunt_subdomain', action='store_true', default=False, help='hunt for subdomains')
+  parser.add_option('-e', dest='hunt_email', action='store_true', default=False, help='hunt for emails')
+  parser.add_option('-p', dest='plugins', metavar='id,id2 ...', help='only run specific plugins (default is to run all plugins, each plugin in a separate thread)')
+  parser.add_option('-x', dest='extra', action='append', metavar='id|param|val', help='use plugin specific parameters')
+  parser.add_option('--debug', dest='debug', action='store_true', default=False, help='print debugging information')
 
-  parser.add_option('-l', dest='pluginlist', action='store_true',
-    help='list all available plugins')
-  parser.add_option('-p', dest='plugins', metavar='id,id2 ...',
-    help='only run given plugins (default is to run all of them)')
-
-  parser.add_option('-q', dest='pluginusage', metavar='id',
-    help='display plugin usage')
-  parser.add_option('-x', dest='extra', action='append', metavar='id|param|val',
-    help='use plugin specific parameters')
-
-  parser.add_option('--debug', dest='debug', action='store_true', default=False, 
-    help='print debugging information')
+  # TODO to implement...
+  #parser.add_option('-l', dest='pluginlist', action='store_true', help='list all available plugins')
+  #parser.add_option('-q', dest='pluginusage', metavar='id', help='display plugin usage')
 
   (opts, args) = parser.parse_args(argv)
   if not (opts.hunt_url or opts.hunt_subdomain or opts.hunt_email):
     parser.error('Missing required option')
   if not args:
     parser.error('Missing required argument')
+
   return opts, args[0]
 
 class BasePlugin(Thread):
@@ -178,6 +179,33 @@ class BaseSE(BasePlugin):
       self.hunt_conf[q].append((k, re_func))
       self.rr[k] = []
 
+    self.fp = pycurl.Curl()
+    self.fp.setopt(pycurl.SSL_VERIFYPEER, 0)
+    self.fp.setopt(pycurl.SSL_VERIFYHOST, 0)
+    self.fp.setopt(pycurl.HEADER, 1)
+    #self.fp.setopt(pycurl.PROXY, '127.0.0.1:8082')
+
+  def fetch(self, url):
+
+    def noop(buf): pass
+    self.fp.setopt(pycurl.WRITEFUNCTION, noop)
+
+    def debug_func(t, s):
+      if t in (pycurl.INFOTYPE_HEADER_IN, pycurl.INFOTYPE_DATA_IN):
+        resp.write(s)
+
+    resp = StringIO()
+
+    self.fp.setopt(pycurl.DEBUGFUNCTION, debug_func)
+    self.fp.setopt(pycurl.VERBOSE, 1)
+
+    self.fp.setopt(pycurl.URL, url)
+    self.fp.setopt(pycurl.HTTPGET, 1)
+
+    self.fp.perform()
+
+    return self.fp.getinfo(pycurl.HTTP_CODE), resp.getvalue()
+
   def run(self):
     for query, regs in self.hunt_conf.iteritems():
       for html in self.request(query):
@@ -205,7 +233,6 @@ class BaseSE(BasePlugin):
     return re.compile(r'(\w+://[^/]*%s(?::[\d\w]+)?/)' % self.domain, re.I)
 
   def re_email(self):
-    #return re.compile(r'([\w.+-]+@\S+?%s)' % self.domain.split('.')[-1], re.I)
     return re.compile(r'([\w.+-]+@.+?%s)' % self.domain.split('.')[-1], re.I) # gets more emails but still buggy
 
   def post_email(self, emails):
@@ -217,97 +244,82 @@ class BaseSE(BasePlugin):
   def post_url(self, urls):
     return [u.replace('&amp;', '&') for u in remove_tags(urls)] 
 
-
 class GoogleSE(BaseSE):
   # asking beyond page 9 gives warning page "Google does not serve more than 1000 results for any query"
   maxpages = 10
 
   def re_url(self):
-    return re.compile(r'href="/url\?q=(\w+://(?:[^/]+\.)?%s(?::[\d\w]+)?/.*?)(?:%%2B|&amp)' % self.domain, re.I)
+    return re.compile(r'href="(\w+://(?:[^/]+\.)?%s(?::[\d\w]+)?/[^"]*)' % self.domain, re.I)
 
   def post_url(self, urls):
-    return [unquote(u) for u in remove_tags(urls)]
+    return [decode_html(u) for u in urls]
 
   def __init__(self, domain, extra=None, hunt_url=True, hunt_subdomain=True, hunt_email=True):
     BaseSE.__init__(self, domain, extra, hunt_url, hunt_subdomain, hunt_email)
 
+    #headers = ['User-Agent: Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)', # googlebot user-agent used to never get banned
+    headers = ['User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:21.0) Gecko/20100101 Firefox/21.0',
+               'Cookie: PREF=ID=5abdaf154fc78f7c:U=1f4663bf92fa3ef4:FF=0:LD=en:NR=100:TM=1374631009:LM=1374631113:SG=2:S=m-6Z3KHy4YZgHaZ6']
+
+    self.fp.setopt(pycurl.HTTPHEADER, headers)
+
   def request(self, query):
-    headers = {'User-Agent': useragent_googlebot, # googlebot is less likely to get banned
-               'Host': 'www.google.com',}
-
-    if self.headers:
-      headers.update(self.headers)
-
-    proxies = {} #{'http': 'http://127.0.0.1:8082', 'https': 'http://127.0.0.1:8082'} # debug
-    opener = urllib2.build_opener(urllib2.ProxyHandler(proxies))
-    opener.addheaders = headers.items()
 
     for page_idx in range(self.maxpages):
-      # query string sent by the advanced search form
-      uri = '/search?q=%s&hl=en&num=100&lr=&ft=i&cr=&safe=images&filter=0&start=%d' % (quote(query.strip()), page_idx * 100)
-      logger.debug('Google: %s' % uri)
-      r = opener.open('http://www.google.com' + uri)
+      url = 'https://www.google.com/search?q=%s&hl=en&num=100&sa=N&filter=0&start=%d' % (quote(query.strip()), page_idx * 100)
+      logger.debug('Google: %s' % url)
+      code, data = self.fetch(url)
 
-      if r.code != 200:
-        raise Exception('HTTP error: %d %s' % (r.code, r.msg))
+      if code != 200:
+        raise Exception('HTTP error: %d' % code)
 
-      yield r.read()
+      yield data
+
+      open('/tmp/google_page_%d' % page_idx, 'w').write(data)
+
+      if 'Next</span></a>' not in data:
+        break
 
 class BingSE(BaseSE): 
+
   maxpages = 100
+
   def __init__(self, domain, extra=None, hunt_url=True, hunt_subdomain=True, hunt_email=True):
     BaseSE.__init__(self, domain, extra, hunt_url, hunt_subdomain, hunt_email)
 
   def request(self, query):
-    headers = {'User-Agent': 'Mozilla/5.0',
-               'Host': 'www.bing.com',
-               'Accept-Language': 'en-us,en'} # we need the Next button in English
-    if self.headers:
-      headers.update(self.headers)
+    headers = ['User-Agent: Mozilla/5.0', # or maybe use msnbot User-Agent: 'msnbot/1.1 (+http://search.msn.com/msnbot.htm)'
+               'Host: www.bing.com',
+               'Accept-Language: en-us,en'] # we need the Next button in English
 
-    proxies = {} #{'http': 'http://127.0.0.1:8082', 'https': 'http://127.0.0.1:8082'} # debug
-    cjar = CookieJar()
-    opener = urllib2.build_opener(urllib2.HTTPCookieProcessor(cjar), urllib2.ProxyHandler(proxies))
-    opener.addheaders = headers.items()
+    self.fp.setopt(pycurl.HTTPHEADER, headers)
 
     # either stop after too many pages or after the Next button disappears
     btn_next = 'Next</div></a></li>'
 
     page_idx = 0
     stop = False
+
     while not stop:
       uri =  '/search?q=%s&first=%s' % (quote(query.strip()), (page_idx * 10) + 1)
       logger.debug('Bing: %s' % uri)
-      r = opener.open('http://www.bing.com' + uri)
+      code, data = self.fetch('http://www.bing.com' + uri)
 
-      # bypass anti-bot protection
-      for c in cjar:
-        if c.name == 'OrigMUID':
-          ig, cid = c.value.split('%2c')
-          uri = '/fd/ls/GLinkPing.aspx?CM=TMF&IG=%s&CID=%s' % (ig, cid)
-
-          logger.debug('Bing: %s' % uri)
-          opener.open('http://www.bing.com' + uri)
-          break
-
-      if r.code != 200:
-        raise Exception('HTTP error: %d %s' % (r.code, r.msg))
-      html = r.read()
+      if code != 200:
+        raise Exception('HTTP error: %d' % code)
 
       page_idx += 1
-      if btn_next not in html or page_idx > self.maxpages: 
+      if btn_next not in data or page_idx > self.maxpages:
         stop = True
 
-      yield html
-
-useragent_googlebot = 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
-useragent_msnbot = 'msnbot/1.1 (+http://search.msn.com/msnbot.htm)'
+      yield data
 
 all_plugins = {'google': GoogleSE, 'bing': BingSE}
 all_targets = ['url', 'subdomain', 'email']
 
 def main():
-  opts, domain = parse_options(sys.argv[1:])
+  from sys import argv
+  opts, domain = parse_options(argv[1:])
   if opts.debug: logger.setLevel(logging.DEBUG)
 
   plugin_extra = {} # {'google': {'headers': 'Cookie': ...', 'query': '...'}, 'bing': ...}
