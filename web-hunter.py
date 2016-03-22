@@ -2,12 +2,13 @@
 # -*- coding: utf-8 -*-
 
 import re
-from time import sleep
-from optparse import OptionParser
+import time
+import argparse
 import logging
 from threading import Thread, active_count
 from socket import gethostbyname, gaierror
-import pycurl
+import requests
+import sys
 
 try:
   # python3+
@@ -33,36 +34,41 @@ def decode_html(s):
   return HTMLParser().unescape(s)
 
 def parse_options(argv):
-  usage_str = "usage: %prog options domain\n\n" \
-    "Hunt domain for URLs, subdomains and emails:\n" \
-    "$ %prog -u -s -e example.com\n\n" \
-    "Hunt for emails using only Google, a more specific query, and a valid Cookie to bypass anti-bot captcha:\n" \
-    "$ %prog -e -p google -x 'google|query|-inurl:index.php example.com' -x 'google|headers|Cookie: GDSESS=..' example.com\n\n" \
-    "Hunt for subdomains using only Bing and a specific search:\n" \
-    "$ %prog -s -p bing -x 'bing|query|ip:1.2.3.4' example.com\n\n" \
-    "Both search engines support the filetype operator:\n" \
-    "$ %prog -u -x 'bing,google|query|example.com -filetype:pdf' example.com"
+  usage_str = """%(prog)s options domain
+Hunt domain for URLs, subdomains and emails:
+    $ %(prog)s -u -s -e example.com
 
-  parser = OptionParser(usage=usage_str)
+Hunt for emails using only Google, a more specific query, and a valid Cookie to bypass anti-bot captcha:
+    $ %(prog)s -e -p google -x 'google|query|-inurl:index.php example.com' -x 'google|headers|Cookie: GDSESS=..' example.com
 
-  parser.add_option('-u', dest='hunt_url', action='store_true', default=False, help='hunt for URLs')
-  parser.add_option('-s', dest='hunt_subdomain', action='store_true', default=False, help='hunt for subdomains')
-  parser.add_option('-e', dest='hunt_email', action='store_true', default=False, help='hunt for emails')
-  parser.add_option('-p', dest='plugins', metavar='id,id2 ...', help='only run specific plugins (default is to run all plugins, each plugin in a separate thread)')
-  parser.add_option('-x', dest='extra', action='append', metavar='id|param|val', help='use plugin specific parameters')
-  parser.add_option('--debug', dest='debug', action='store_true', default=False, help='print debugging information')
+Hunt for subdomains using only Bing and a specific search:
+    $ %(prog)s -s -p bing -x 'bing|query|ip:1.2.3.4' example.com
+
+Both search engines support the filetype operator:
+    $ %(prog)s -u -x 'bing,google|query|example.com -filetype:pdf' example.com"""
+
+  parser = argparse.ArgumentParser(prog=argv[0], usage=usage_str)
+
+  parser.add_argument('-u', dest='hunt_url', action='store_true', default=False, help='hunt for URLs')
+  parser.add_argument('-s', dest='hunt_subdomain', action='store_true', default=False, help='hunt for subdomains')
+  parser.add_argument('-e', dest='hunt_email', action='store_true', default=False, help='hunt for emails')
+  parser.add_argument('-p', dest='plugins', metavar='id,id2 ...', help='only run specific plugins (default is to run all plugins, each plugin in a separate thread)')
+  parser.add_argument('-x', dest='extra', action='append', metavar='id|param|val', help='use plugin specific parameters')
+  parser.add_argument('--debug', dest='debug', action='store_true', default=False, help='print debugging information')
+
+  parser.add_argument('url', help='specify the domain to search')
 
   # TODO to implement...
   #parser.add_option('-l', dest='pluginlist', action='store_true', help='list all available plugins')
   #parser.add_option('-q', dest='pluginusage', metavar='id', help='display plugin usage')
 
-  (opts, args) = parser.parse_args(argv)
-  if not (opts.hunt_url or opts.hunt_subdomain or opts.hunt_email):
+  args = parser.parse_args(argv[1:])
+  if not (args.hunt_url or args.hunt_subdomain or args.hunt_email):
     parser.error('Missing required option')
   if not args:
     parser.error('Missing required argument')
 
-  return opts, args[0]
+  return args, args[0]
 
 class BasePlugin(Thread):
   def __init__(self, domain, extra, hunt_url, hunt_subdomain, hunt_email):
@@ -82,21 +88,22 @@ class BasePlugin(Thread):
 
   @staticmethod
   def pprint_generic(t, l):
-    print '-' * (69-len(t)), t
-    print '\n'.join(set(l))
-    print
+    print ("%s %s" % ('-' * (69-len(t)), t))
+    print ('\n'.join(set(l)))
+    print ('\n')
 
   @staticmethod
   def pprint_dic(title, dic, fmt):
-    print '-' * (69-len(title)), title
-    for k, l in dic.iteritems():
+    print ("%s %s" % ('-' * (69-len(title)), title))
+    for k in dic.keys():
+      l = dic[k]
       first = True
       for v in l:
         if first:
-          print fmt % (k, v)
+          print (fmt % (k, v))
           first = False
         else:
-          print fmt % ('', v)
+          print (fmt % ('', v))
 
   @staticmethod
   def pprint_email(emails, title='Emails'):
@@ -105,7 +112,7 @@ class BasePlugin(Thread):
       rcpt, dom = re.match(r'(.+?)(@.+)$', email).groups()
       if dom not in rr: rr[dom] = []
       rr[dom].append(rcpt)
-    
+
     BasePlugin.pprint_dic(title, rr, '%40s %s')
 
 
@@ -130,8 +137,8 @@ class BasePlugin(Thread):
       (scheme, netloc, path, params, query, fragment) = urlparse(url)
       key = '%s://%s' % (scheme, netloc)
       if key not in stats: stats[key] = {}
-      
-      if path.count('/') == 1: 
+
+      if path.count('/') == 1:
         pdir = '/'
       else:
         pdir = path[:path.rindex('/')]
@@ -139,13 +146,15 @@ class BasePlugin(Thread):
       if pdir not in stats[key]:
         stats[key][pdir] = []
       stats[key][pdir].append(url)
-        
-    print '-' * (69-len(title)), title
-    for key, dic in sorted(stats.iteritems()):
-      for pdir, urls in sorted(dic.iteritems()):
-        print '%s%s' % (key, pdir)
-        print '\n'.join(sorted(set(urls)))
-        print
+
+    print ('%s%s' % ('-' * (69-len(title)), title))
+    for key in sorted(stats.keys()):
+      dic = stats[key]
+      for pdir in sorted(dic.keys()):
+        urls = dic[pdir]
+        print ('%s%s' % (key, pdir))
+        print ('\n'.join(sorted(set(urls))))
+        print ('\n')
 
 def remove_tags(l):
   return map(lambda a: re.sub(r'<[^>]+>', '', a), l)
@@ -165,55 +174,35 @@ class BaseSE(BasePlugin):
       self.headers[k.strip()] = v.strip()
 
     if 'query' in extra:
-      for k in target_conf: 
+      for k in target_conf:
         target_conf[k] = extra['query']
 
     if 'maxpages' in extra:
       self.maxpages = int(extra['maxpages'])
 
     self.hunt_conf = {} # {'site:example.com': ('url': re_func, ...), 'example.com': ...}
-    for k, q in target_conf.iteritems():
+    for k in target_conf.keys():
+      q = target_conf[k]
       re_func = getattr(self, 're_%s' % k)()
 
       if q not in self.hunt_conf: self.hunt_conf[q] = []
       self.hunt_conf[q].append((k, re_func))
       self.rr[k] = []
 
-    self.fp = pycurl.Curl()
-    self.fp.setopt(pycurl.SSL_VERIFYPEER, 0)
-    self.fp.setopt(pycurl.SSL_VERIFYHOST, 0)
-    self.fp.setopt(pycurl.HEADER, 1)
-    #self.fp.setopt(pycurl.PROXY, '127.0.0.1:8082')
-
-  def fetch(self, url):
-
-    def noop(buf): pass
-    self.fp.setopt(pycurl.WRITEFUNCTION, noop)
-
-    def debug_func(t, s):
-      if t in (pycurl.INFOTYPE_HEADER_IN, pycurl.INFOTYPE_DATA_IN):
-        resp.write(s)
-
-    resp = StringIO()
-
-    self.fp.setopt(pycurl.DEBUGFUNCTION, debug_func)
-    self.fp.setopt(pycurl.VERBOSE, 1)
-
-    self.fp.setopt(pycurl.URL, url)
-    self.fp.setopt(pycurl.HTTPGET, 1)
-
-    self.fp.perform()
-
-    return self.fp.getinfo(pycurl.HTTP_CODE), resp.getvalue()
+  def fetch(self, url, headers={"User-Agent": "Mozilla/5.0 (compatible; MSIE 9.0; Windows NT 6.1; Win32; x86; Trident/5.0)"}):
+    h = requests.get(url, headers=headers)
+    return h.status_code, h.text
 
   def run(self):
-    for query, regs in self.hunt_conf.iteritems():
+    for query in self.hunt_conf.keys():
+      regs = self.hunt_conf[query]
       for html in self.request(query):
         for k, r in regs:
           self.rr[k].extend(r.findall(html))
 
     # postprocess
-    for k, v in self.rr.iteritems():
+    for k in self.rr.keys():
+      v = self.rr[k]
       if hasattr(self, 'post_%s' % k):
         self.rr[k] = getattr(self, 'post_%s' % k)(v)
 
@@ -242,7 +231,7 @@ class BaseSE(BasePlugin):
     return remove_tags(subdomains)
 
   def post_url(self, urls):
-    return [u.replace('&amp;', '&') for u in remove_tags(urls)] 
+    return [u.replace('&amp;', '&') for u in remove_tags(urls)]
 
 class GoogleSE(BaseSE):
   # asking beyond page 9 gives warning page "Google does not serve more than 1000 results for any query"
@@ -257,18 +246,15 @@ class GoogleSE(BaseSE):
   def __init__(self, domain, extra=None, hunt_url=True, hunt_subdomain=True, hunt_email=True):
     BaseSE.__init__(self, domain, extra, hunt_url, hunt_subdomain, hunt_email)
 
-    #headers = ['User-Agent: Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)', # googlebot user-agent used to never get banned
-    headers = ['User-Agent: Mozilla/5.0 (X11; Linux x86_64; rv:21.0) Gecko/20100101 Firefox/21.0',
-               'Cookie: PREF=ID=5abdaf154fc78f7c:U=1f4663bf92fa3ef4:FF=0:LD=en:NR=100:TM=1374631009:LM=1374631113:SG=2:S=m-6Z3KHy4YZgHaZ6']
+    self.headers = {'User-Agent':'Mozilla/5.0 (X11; Linux x86_64; rv:21.0) Gecko/20100101 Firefox/21.0',
+                    'Cookie':'PREF=ID=5abdaf154fc78f7c:U=1f4663bf92fa3ef4:FF=0:LD=en:NR=100:TM=1374631009:LM=1374631113:SG=2:S=m-6Z3KHy4YZgHaZ6'}
 
-    self.fp.setopt(pycurl.HTTPHEADER, headers)
 
   def request(self, query):
-
     for page_idx in range(self.maxpages):
       url = 'https://www.google.com/search?q=%s&hl=en&num=100&sa=N&filter=0&start=%d' % (quote(query.strip()), page_idx * 100)
       logger.debug('Google: %s' % url)
-      code, data = self.fetch(url)
+      code, data = self.fetch(url, self.headers)
 
       if code != 200:
         raise Exception('HTTP error: %d' % code)
@@ -280,7 +266,7 @@ class GoogleSE(BaseSE):
       if 'Next</span></a>' not in data:
         break
 
-class BingSE(BaseSE): 
+class BingSE(BaseSE):
 
   maxpages = 100
 
@@ -288,11 +274,9 @@ class BingSE(BaseSE):
     BaseSE.__init__(self, domain, extra, hunt_url, hunt_subdomain, hunt_email)
 
   def request(self, query):
-    headers = ['User-Agent: Mozilla/5.0', # or maybe use msnbot User-Agent: 'msnbot/1.1 (+http://search.msn.com/msnbot.htm)'
-               'Host: www.bing.com',
-               'Accept-Language: en-us,en'] # we need the Next button in English
-
-    self.fp.setopt(pycurl.HTTPHEADER, headers)
+    self.headers = {'User-Agent':' Mozilla/5.0', # or maybe use msnbot User-Agent: 'msnbot/1.1 (+http://search.msn.com/msnbot.htm)'
+                    'Host':'www.bing.com',
+                    'Accept-Language':'en-us,en'} # we need the Next button in English
 
     # either stop after too many pages or after the Next button disappears
     btn_next = 'Next</div></a></li>'
@@ -303,7 +287,7 @@ class BingSE(BaseSE):
     while not stop:
       uri =  '/search?q=%s&first=%s' % (quote(query.strip()), (page_idx * 10) + 1)
       logger.debug('Bing: %s' % uri)
-      code, data = self.fetch('http://www.bing.com' + uri)
+      code, data = self.fetch('http://www.bing.com' + uri, self.headers)
 
       if code != 200:
         raise Exception('HTTP error: %d' % code)
@@ -318,43 +302,48 @@ all_plugins = {'google': GoogleSE, 'bing': BingSE}
 all_targets = ['url', 'subdomain', 'email']
 
 def main():
-  from sys import argv
-  opts, domain = parse_options(argv[1:])
-  if opts.debug: logger.setLevel(logging.DEBUG)
+  args = parse_options(sys.argv)
+  domain = args.url
+
+  if args.debug: logger.setLevel(logging.DEBUG)
 
   plugin_extra = {} # {'google': {'headers': 'Cookie': ...', 'query': '...'}, 'bing': ...}
   for pid in all_plugins:
     plugin_extra[pid] = {}
 
-  if opts.extra:
-    for extra in opts.extra:
+  if args.extra:
+    for extra in args.extra:
       pids, param, val = extra.split('|')
       for pid in pids.split(','):
         plugin_extra[pid].update({param: val})
 
   run_plugins = {}
-  for k, v in all_plugins.iteritems():
-    if not opts.plugins or k in opts.plugins.split(','):
+  for k in all_plugins.keys():
+    v = all_plugins[k]
+    if not args.plugins or k in args.plugins.split(','):
       run_plugins[k] = v
-  
+
   plugins = []
-  for pid, klass in run_plugins.iteritems():
+  for pid in run_plugins.keys():
+    klass = run_plugins[pid]
     extra = plugin_extra[pid]
 
-    p = klass(domain, extra, hunt_url=opts.hunt_url, hunt_subdomain=opts.hunt_subdomain, hunt_email=opts.hunt_email)
+    p = klass(domain, extra, hunt_url=args.hunt_url, hunt_subdomain=args.hunt_subdomain, hunt_email=args.hunt_email)
     p.start()
     plugins.append(p)
 
   while active_count() > 1:
-    sleep(0.5)
+    time.sleep(0.5)
 
   all_rr = {}
   for p in plugins:
-    for k, v in p.rr.iteritems():
+    for k in p.rr.keys():
+      v = p.rr[k]
       if k not in all_rr: all_rr[k] = []
       all_rr[k].extend(v)
-    
-  for k, v in all_rr.iteritems():
+
+  for k in all_rr.keys():
+    v = all_rr[k]
     getattr(BasePlugin, 'pprint_%s' % k)(v)
 
 
