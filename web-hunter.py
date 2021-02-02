@@ -65,7 +65,7 @@ Both search engines support the filetype operator:
   args = parser.parse_args(argv[1:])
   if not (args.hunt_url or args.hunt_subdomain or args.hunt_email):
     parser.error('Missing required option')
-  if not args:
+  if not args.url:
     parser.error('Missing required argument')
 
   return args, args[0]
